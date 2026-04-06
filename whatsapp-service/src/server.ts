@@ -41,17 +41,6 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Keep-alive ping endpoint (no auth) - for Render free tier
-app.get("/ping", (req, res) => {
-  const whatsappStatus = whatsappService.getStatus();
-  res.json({ 
-    pong: true, 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    whatsappConnected: whatsappStatus.connected,
-  });
-});
-
 // Auth middleware for protected routes
 const authMiddleware = (
   req: express.Request,
@@ -237,39 +226,8 @@ whatsappService.setEventEmitter({
   }
 });
 
-// ============================================
-// Keep-Alive System for Render Free Tier
-// ============================================
-
-const RENDER_SERVICE_URL = process.env.RENDER_SERVICE_URL || "";
-const KEEP_ALIVE_INTERVAL = 30000; // 30 seconds
-
-function startKeepAlive() {
-  if (!RENDER_SERVICE_URL) {
-    console.log("[Keep-Alive] RENDER_SERVICE_URL not set, self-ping disabled");
-    return;
-  }
-
-  console.log(`[Keep-Alive] Starting self-ping every ${KEEP_ALIVE_INTERVAL / 1000}s to ${RENDER_SERVICE_URL}`);
-
-  setInterval(async () => {
-    try {
-      const response = await fetch(`${RENDER_SERVICE_URL}/ping`);
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`[Keep-Alive] Ping OK - Uptime: ${Math.floor(data.uptime)}s, WhatsApp: ${data.whatsappConnected ? "connected" : "disconnected"}`);
-      }
-    } catch (error) {
-      console.error("[Keep-Alive] Ping failed:", (error as Error).message);
-    }
-  }, KEEP_ALIVE_INTERVAL);
-}
-
 // Start server
 httpServer.listen(PORT, () => {
-  // Start keep-alive after server is up
-  startKeepAlive();
-
   console.log(`
 ========================================
   WhatsApp Service running on port ${PORT}
