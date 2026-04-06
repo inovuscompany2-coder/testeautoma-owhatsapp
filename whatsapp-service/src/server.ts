@@ -37,23 +37,8 @@ app.get("/", (req, res) => {
 });
 
 // Health check (no auth)
-let keepAliveCount = 0;
-let serverStartTime = Date.now();
-
 app.get("/health", (req, res) => {
-  keepAliveCount++;
-  const uptimeSeconds = Math.floor((Date.now() - serverStartTime) / 1000);
-  res.json({ 
-    status: "ok", 
-    timestamp: new Date().toISOString(),
-    keepAlive: {
-      enabled: true,
-      intervalSeconds: 30,
-      pingCount: keepAliveCount,
-      uptimeSeconds,
-      uptimeFormatted: `${Math.floor(uptimeSeconds / 3600)}h ${Math.floor((uptimeSeconds % 3600) / 60)}m ${uptimeSeconds % 60}s`
-    }
-  });
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
 // Auth middleware for protected routes
@@ -241,33 +226,8 @@ whatsappService.setEventEmitter({
   }
 });
 
-// ============================================
-// Self Keep-Alive (prevents Render from sleeping)
-// ============================================
-
-const RENDER_URL = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_URL || `http://localhost:${PORT}`;
-const KEEP_ALIVE_INTERVAL = 30000; // 30 seconds
-
-function startKeepAlive() {
-  console.log(`[Keep-Alive] Starting self-ping every ${KEEP_ALIVE_INTERVAL / 1000}s to ${RENDER_URL}`);
-  
-  setInterval(async () => {
-    try {
-      const url = `${RENDER_URL}/health`;
-      const response = await fetch(url);
-      const data = await response.json();
-      console.log(`[Keep-Alive] Ping OK - ${data.timestamp}`);
-    } catch (error) {
-      console.log(`[Keep-Alive] Ping failed (this is normal on startup): ${(error as Error).message}`);
-    }
-  }, KEEP_ALIVE_INTERVAL);
-}
-
 // Start server
 httpServer.listen(PORT, () => {
-  // Start keep-alive after server is running
-  startKeepAlive();
-  
   console.log(`
 ========================================
   WhatsApp Service running on port ${PORT}

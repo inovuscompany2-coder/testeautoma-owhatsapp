@@ -9,7 +9,6 @@ import { BulkMessageSender } from "./bulk-message-sender";
 import { MessageHistory } from "./message-history";
 import { ListCleaner } from "./list-cleaner";
 import { ConnectionLogs } from "./connection-logs";
-import { ServerKeepAlive } from "./server-keep-alive";
 import { useWhatsAppSocket } from "@/lib/hooks/use-whatsapp-socket";
 import { Power, PowerOff, Phone, Send, History, Filter, FileText, Wifi, WifiOff } from "lucide-react";
 
@@ -320,11 +319,6 @@ export function WhatsAppConnect() {
                 </>
               )}
             </Button>
-
-            {/* Server Keep-Alive Monitor */}
-            <div className="w-full pt-4 border-t">
-              <ServerKeepAlive />
-            </div>
           </CardContent>
         </Card>
       </div>
