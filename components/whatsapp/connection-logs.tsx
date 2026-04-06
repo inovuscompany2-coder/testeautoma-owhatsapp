@@ -29,6 +29,7 @@ export function ConnectionLogs() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [serviceOffline, setServiceOffline] = useState(false);
   const [filter, setFilter] = useState<"all" | "debug" | "info" | "warn" | "error">("all");
   const [autoRefresh, setAutoRefresh] = useState(false);
 
@@ -39,14 +40,31 @@ export function ConnectionLogs() {
       params.set("limit", "200");
 
       const response = await fetch(`/api/whatsapp/logs?${params.toString()}`);
+      
+      // Check if response is JSON before parsing
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        setServiceOffline(true);
+        setLogs([]);
+        setError(null);
+        return;
+      }
+
       const data = await response.json();
+
+      if (data.serviceOffline) {
+        setServiceOffline(true);
+      } else {
+        setServiceOffline(false);
+      }
 
       if (data.logs) {
         setLogs(data.logs);
       }
       setError(null);
     } catch {
-      setError("Erro ao carregar logs");
+      setServiceOffline(true);
+      setLogs([]);
     } finally {
       setLoading(false);
     }
@@ -126,6 +144,15 @@ export function ConnectionLogs() {
             </Button>
           ))}
         </div>
+
+        {/* Service offline state */}
+        {serviceOffline && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+            <p className="text-sm font-medium text-amber-700">
+              Servico WhatsApp offline. Inicie o whatsapp-service para ver os logs em tempo real.
+            </p>
+          </div>
+        )}
 
         {/* Error state */}
         {error && (
