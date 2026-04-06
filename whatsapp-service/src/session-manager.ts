@@ -4,24 +4,26 @@ const { Client, LocalAuth } = pkg;
 import QRCode from "qrcode";
 import path from "path";
 import { fileURLToPath } from "url";
+import type { EventEmitter, ReceivedMessage, ConnectionStatus } from "./whatsapp.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export type ConnectionStatus = "disconnected" | "connecting" | "qr" | "connected";
-
-export interface ReceivedMessage {
-  id: string;
-  from: string;
-  message: string;
-  timestamp: number;
-  pushName?: string;
+export interface SessionInfo {
+  userId: string;
+  status: ConnectionStatus;
+  connected: boolean;
+  connecting: boolean;
+  phone: string | null;
+  reconnecting: boolean;
+  reconnectAttempts: number;
+  createdAt: Date;
+  lastActivity: Date;
 }
 
-export interface EventEmitter {
-  emit: (event: string, data: unknown) => void;
-}
-
-class WhatsAppService {
+/**
+ * WhatsAppSession - Manages a single WhatsApp connection for a user
+ */
+class WhatsAppSession {
   private client: typeof Client.prototype | null = null;
   private connectionStatus: ConnectionStatus = "disconnected";
   private qrCodeBase64: string | null = null;
@@ -34,10 +36,22 @@ class WhatsAppService {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectTimeoutId: NodeJS.Timeout | null = null;
-  private reconnectDelays = [5000, 10000, 30000, 60000, 120000]; // 5s, 10s, 30s, 1min, 2min
+  private reconnectDelays = [5000, 10000, 30000, 60000, 120000];
   
   // Event emitter for Socket.io integration
   private eventEmitter: EventEmitter | null = null;
+  
+  // Session metadata
+  public readonly userId: string;
+  public readonly createdAt: Date;
+  public lastActivity: Date;
+
+  constructor(userId: string) {
+    this.userId = userId;
+    this.createdAt = new Date();
+    this.lastActivity = new Date();
+    console.log(`[Session:${userId}] Created new session`);
+  }
 
   setEventEmitter(emitter: EventEmitter) {
     this.eventEmitter = emitter;
@@ -45,31 +59,44 @@ class WhatsAppService {
 
   private emitEvent(event: string, data: unknown) {
     if (this.eventEmitter) {
-      this.eventEmitter.emit(event, data);
+      // Include userId in all events for multi-tenant routing
+      this.eventEmitter.emit(event, { ...data as object, userId: this.userId });
     }
   }
 
-  getStatus() {
+  private updateActivity() {
+    this.lastActivity = new Date();
+  }
+
+  getStatus(): SessionInfo & { status: ConnectionStatus } {
+    this.updateActivity();
     return {
+      userId: this.userId,
       status: this.connectionStatus,
       connected: this.connectionStatus === "connected",
       connecting: this.connectionStatus === "connecting" || this.connectionStatus === "qr",
       phone: this.connectedPhone,
       reconnecting: this.reconnectTimeoutId !== null,
       reconnectAttempts: this.reconnectAttempts,
+      createdAt: this.createdAt,
+      lastActivity: this.lastActivity,
     };
   }
 
   getQR() {
+    this.updateActivity();
     return {
       qrCode: this.qrCodeBase64,
       connected: this.connectionStatus === "connected",
       connecting: this.connectionStatus === "connecting" || this.connectionStatus === "qr",
       status: this.connectionStatus,
+      userId: this.userId,
     };
   }
 
   async connect(): Promise<{ message: string; status: ConnectionStatus }> {
+    this.updateActivity();
+    
     if (this.connectionStatus === "connected") {
       return { message: "Already connected", status: this.connectionStatus };
     }
@@ -80,6 +107,7 @@ class WhatsAppService {
 
     this.isInitializing = true;
     this.connectionStatus = "connecting";
+    this.emitEvent("status", this.getStatus());
 
     try {
       await this.initializeClient();
@@ -87,6 +115,7 @@ class WhatsAppService {
     } catch (error) {
       this.connectionStatus = "disconnected";
       this.isInitializing = false;
+      this.emitEvent("status", this.getStatus());
       throw error;
     }
   }
@@ -97,16 +126,18 @@ class WhatsAppService {
       try {
         await this.client.destroy();
       } catch (e) {
-        console.log("[WhatsApp] Error destroying old client:", e);
+        console.log(`[Session:${this.userId}] Error destroying old client:`, e);
       }
       this.client = null;
     }
 
-    const authPath = path.join(__dirname, "..", "auth");
+    // Each user gets their own auth folder
+    const authPath = path.join(__dirname, "..", "auth", this.userId);
 
     this.client = new Client({
       authStrategy: new LocalAuth({
         dataPath: authPath,
+        clientId: this.userId,
       }),
       puppeteer: {
         headless: true,
@@ -125,71 +156,69 @@ class WhatsAppService {
 
     // QR Code event
     this.client.on("qr", async (qr: string) => {
-      console.log("[WhatsApp] QR Code received");
+      console.log(`[Session:${this.userId}] QR Code received`);
       this.connectionStatus = "qr";
+      this.updateActivity();
       try {
         this.qrCodeBase64 = await QRCode.toDataURL(qr);
-        console.log("[WhatsApp] QR Code generated as base64");
-        // Emit QR event via Socket.io
         this.emitEvent("qr", this.getQR());
         this.emitEvent("status", this.getStatus());
       } catch (err) {
-        console.error("[WhatsApp] Error generating QR:", err);
+        console.error(`[Session:${this.userId}] Error generating QR:`, err);
       }
     });
 
     // Ready event
     this.client.on("ready", async () => {
-      console.log("[WhatsApp] Client is ready!");
+      console.log(`[Session:${this.userId}] Client is ready!`);
       this.connectionStatus = "connected";
       this.qrCodeBase64 = null;
       this.isInitializing = false;
-      
-      // Reset reconnection state on successful connection
       this.reconnectAttempts = 0;
       this.cancelReconnect();
+      this.updateActivity();
 
       try {
         const info = this.client?.info;
         if (info?.wid?.user) {
           this.connectedPhone = info.wid.user;
-          console.log("[WhatsApp] Connected as:", this.connectedPhone);
+          console.log(`[Session:${this.userId}] Connected as:`, this.connectedPhone);
         }
       } catch (e) {
-        console.log("[WhatsApp] Could not get phone info");
+        console.log(`[Session:${this.userId}] Could not get phone info`);
       }
-      
-      // Emit connected status via Socket.io
+
       this.emitEvent("status", this.getStatus());
     });
 
     // Authenticated event
     this.client.on("authenticated", () => {
-      console.log("[WhatsApp] Authenticated successfully");
+      console.log(`[Session:${this.userId}] Authenticated successfully`);
+      this.updateActivity();
     });
 
     // Auth failure event
     this.client.on("auth_failure", (msg: string) => {
-      console.error("[WhatsApp] Authentication failed:", msg);
+      console.error(`[Session:${this.userId}] Authentication failed:`, msg);
       this.connectionStatus = "disconnected";
       this.isInitializing = false;
+      this.updateActivity();
       
-      // Emit auth failure via Socket.io
-      this.emitEvent("auth_failure", { message: msg });
+      this.emitEvent("auth_failure", { message: msg, userId: this.userId });
       this.emitEvent("status", this.getStatus());
     });
 
     // Disconnected event
     this.client.on("disconnected", (reason: string) => {
-      console.log("[WhatsApp] Disconnected:", reason);
+      console.log(`[Session:${this.userId}] Disconnected:`, reason);
       this.connectionStatus = "disconnected";
       this.qrCodeBase64 = null;
       this.connectedPhone = null;
       this.isInitializing = false;
-      
-      // Emit disconnected status via Socket.io
+      this.updateActivity();
+
       this.emitEvent("status", { ...this.getStatus(), disconnectReason: reason });
-      
+
       // Auto-reconnect unless user explicitly logged out
       if (this.autoReconnect && reason !== "LOGOUT" && reason !== "NAVIGATION") {
         this.scheduleReconnect();
@@ -213,50 +242,48 @@ class WhatsAppService {
           this.messages = this.messages.slice(0, 100);
         }
 
-        console.log("[WhatsApp] New message from:", receivedMessage.pushName || receivedMessage.from);
+        this.updateActivity();
+        console.log(`[Session:${this.userId}] New message from:`, receivedMessage.pushName || receivedMessage.from);
         
-        // Emit new message via Socket.io
-        this.emitEvent("message", receivedMessage);
+        this.emitEvent("message", { ...receivedMessage, userId: this.userId });
       } catch (error) {
-        console.error("[WhatsApp] Error processing message:", error);
+        console.error(`[Session:${this.userId}] Error processing message:`, error);
       }
     });
 
     // Initialize the client
-    console.log("[WhatsApp] Initializing client...");
+    console.log(`[Session:${this.userId}] Initializing client...`);
     await this.client.initialize();
   }
 
   private scheduleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.log("[WhatsApp] Max reconnection attempts reached. Stopping auto-reconnect.");
+      console.log(`[Session:${this.userId}] Max reconnection attempts reached. Stopping auto-reconnect.`);
       this.reconnectAttempts = 0;
       return;
     }
 
     const delay = this.reconnectDelays[Math.min(this.reconnectAttempts, this.reconnectDelays.length - 1)];
-    console.log(`[WhatsApp] Scheduling reconnect attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts} in ${delay / 1000}s`);
-    
-    // Emit reconnecting event via Socket.io
+    console.log(`[Session:${this.userId}] Scheduling reconnect attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts} in ${delay / 1000}s`);
+
     this.emitEvent("reconnecting", {
       attempt: this.reconnectAttempts + 1,
       maxAttempts: this.maxReconnectAttempts,
       nextAttemptIn: delay,
+      userId: this.userId,
     });
 
     this.reconnectTimeoutId = setTimeout(async () => {
       this.reconnectTimeoutId = null;
       this.reconnectAttempts++;
-      
+
       try {
-        console.log(`[WhatsApp] Attempting reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+        console.log(`[Session:${this.userId}] Attempting reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
         await this.connect();
-        // If successful, reset attempts
         this.reconnectAttempts = 0;
-        console.log("[WhatsApp] Reconnection successful!");
+        console.log(`[Session:${this.userId}] Reconnection successful!`);
       } catch (error) {
-        console.error("[WhatsApp] Reconnection failed:", error);
-        // Schedule another attempt
+        console.error(`[Session:${this.userId}] Reconnection failed:`, error);
         this.scheduleReconnect();
       }
     }, delay);
@@ -267,16 +294,8 @@ class WhatsAppService {
       clearTimeout(this.reconnectTimeoutId);
       this.reconnectTimeoutId = null;
       this.reconnectAttempts = 0;
-      console.log("[WhatsApp] Reconnection cancelled");
+      console.log(`[Session:${this.userId}] Reconnection cancelled`);
     }
-  }
-
-  setAutoReconnect(enabled: boolean) {
-    this.autoReconnect = enabled;
-    if (!enabled) {
-      this.cancelReconnect();
-    }
-    console.log(`[WhatsApp] Auto-reconnect ${enabled ? "enabled" : "disabled"}`);
   }
 
   private getMessageType(msg: any): string {
@@ -294,11 +313,12 @@ class WhatsAppService {
   }
 
   async sendMessage(to: string, message: string): Promise<{ success: boolean; message: string }> {
+    this.updateActivity();
+    
     if (!this.client || this.connectionStatus !== "connected") {
       throw new Error("WhatsApp not connected");
     }
 
-    // Format number
     let number = to.replace(/[^0-9]/g, "");
     if (!number.includes("@")) {
       number = `${number}@c.us`;
@@ -308,33 +328,32 @@ class WhatsAppService {
       await this.client.sendMessage(number, message);
       return { success: true, message: "Message sent successfully" };
     } catch (error) {
-      console.error("[WhatsApp] Error sending message:", error);
+      console.error(`[Session:${this.userId}] Error sending message:`, error);
       throw new Error("Failed to send message");
     }
   }
 
   getMessages(limit: number = 50): { messages: ReceivedMessage[] } {
+    this.updateActivity();
     return { messages: this.messages.slice(0, limit) };
   }
 
   async disconnect(): Promise<{ message: string }> {
-    // Cancel any pending reconnection attempts
     this.cancelReconnect();
     
-    // Temporarily disable auto-reconnect during intentional disconnect
     const previousAutoReconnect = this.autoReconnect;
     this.autoReconnect = false;
-    
+
     if (this.client) {
       try {
         await this.client.logout();
       } catch (e) {
-        console.log("[WhatsApp] Error during logout:", e);
+        console.log(`[Session:${this.userId}] Error during logout:`, e);
       }
       try {
         await this.client.destroy();
       } catch (e) {
-        console.log("[WhatsApp] Error during destroy:", e);
+        console.log(`[Session:${this.userId}] Error during destroy:`, e);
       }
       this.client = null;
     }
@@ -344,12 +363,134 @@ class WhatsAppService {
     this.connectedPhone = null;
     this.messages = [];
     this.isInitializing = false;
-    
-    // Re-enable auto-reconnect for future connections
     this.autoReconnect = previousAutoReconnect;
+    this.updateActivity();
+
+    this.emitEvent("status", this.getStatus());
 
     return { message: "Disconnected successfully" };
   }
+
+  async destroy(): Promise<void> {
+    await this.disconnect();
+    console.log(`[Session:${this.userId}] Session destroyed`);
+  }
 }
 
-export const whatsappService = new WhatsAppService();
+/**
+ * SessionManager - Manages multiple WhatsApp sessions for multi-tenant support
+ */
+class SessionManager {
+  private sessions: Map<string, WhatsAppSession> = new Map();
+  private eventEmitter: EventEmitter | null = null;
+  private maxSessionsPerUser = 1; // Limit sessions per user
+
+  constructor() {
+    console.log("[SessionManager] Initialized");
+  }
+
+  setEventEmitter(emitter: EventEmitter) {
+    this.eventEmitter = emitter;
+    // Set emitter for all existing sessions
+    this.sessions.forEach(session => {
+      session.setEventEmitter(emitter);
+    });
+  }
+
+  /**
+   * Get or create a session for a user
+   */
+  async getOrCreateSession(userId: string): Promise<WhatsAppSession> {
+    let session = this.sessions.get(userId);
+
+    if (!session) {
+      session = new WhatsAppSession(userId);
+      if (this.eventEmitter) {
+        session.setEventEmitter(this.eventEmitter);
+      }
+      this.sessions.set(userId, session);
+      console.log(`[SessionManager] Created session for user: ${userId}`);
+    }
+
+    return session;
+  }
+
+  /**
+   * Get an existing session for a user
+   */
+  getSession(userId: string): WhatsAppSession | undefined {
+    return this.sessions.get(userId);
+  }
+
+  /**
+   * Check if a user has an active session
+   */
+  hasSession(userId: string): boolean {
+    return this.sessions.has(userId);
+  }
+
+  /**
+   * Destroy a user's session
+   */
+  async destroySession(userId: string): Promise<void> {
+    const session = this.sessions.get(userId);
+    if (session) {
+      await session.destroy();
+      this.sessions.delete(userId);
+      console.log(`[SessionManager] Destroyed session for user: ${userId}`);
+    }
+  }
+
+  /**
+   * Get all active sessions
+   */
+  getAllSessions(): Map<string, WhatsAppSession> {
+    return this.sessions;
+  }
+
+  /**
+   * Get session count
+   */
+  getSessionCount(): number {
+    return this.sessions.size;
+  }
+
+  /**
+   * Get all session statuses
+   */
+  getAllStatuses(): SessionInfo[] {
+    return Array.from(this.sessions.values()).map(session => session.getStatus());
+  }
+
+  /**
+   * Cleanup inactive sessions (sessions without activity for a specified time)
+   */
+  async cleanupInactiveSessions(maxInactiveMs: number = 30 * 60 * 1000): Promise<number> {
+    const now = new Date();
+    let cleanedCount = 0;
+
+    for (const [userId, session] of this.sessions) {
+      const inactiveTime = now.getTime() - session.lastActivity.getTime();
+      if (inactiveTime > maxInactiveMs) {
+        await this.destroySession(userId);
+        cleanedCount++;
+        console.log(`[SessionManager] Cleaned up inactive session: ${userId}`);
+      }
+    }
+
+    return cleanedCount;
+  }
+
+  /**
+   * Destroy all sessions
+   */
+  async destroyAllSessions(): Promise<void> {
+    for (const userId of this.sessions.keys()) {
+      await this.destroySession(userId);
+    }
+    console.log("[SessionManager] All sessions destroyed");
+  }
+}
+
+// Export singleton instance
+export const sessionManager = new SessionManager();
