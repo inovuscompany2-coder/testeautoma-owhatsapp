@@ -162,16 +162,12 @@ export function WhatsAppConnect() {
     setError(null);
 
     try {
-      const result = connectWhatsApp();
-      // If connectWhatsApp returns a promise (HTTP fallback), await it
-      if (result instanceof Promise) {
-        const response = await result;
-        if (!response.ok) {
-          const data = await response.json();
-          throw new Error(data.error || "Falha ao conectar");
-        }
-        setTimeout(fetchQRHTTP, 500);
+      const response = await connectWhatsApp();
+      if (response && !response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Falha ao conectar");
       }
+      setTimeout(fetchQRHTTP, 500);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro desconhecido");
     } finally {
@@ -184,14 +180,10 @@ export function WhatsAppConnect() {
     setError(null);
 
     try {
-      const result = disconnectWhatsApp();
-      // If disconnectWhatsApp returns a promise (HTTP fallback), await it
-      if (result instanceof Promise) {
-        const response = await result;
-        if (!response.ok) {
-          const data = await response.json();
-          throw new Error(data.error || "Falha ao desconectar");
-        }
+      const response = await disconnectWhatsApp();
+      if (response && !response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Falha ao desconectar");
       }
       
       setHttpQrCode(null);

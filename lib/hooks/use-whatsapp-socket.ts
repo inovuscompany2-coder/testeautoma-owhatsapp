@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { io, Socket } from "socket.io-client";
 
 export interface WhatsAppStatus {
   status: "disconnected" | "connecting" | "qr" | "connected";
@@ -37,15 +36,17 @@ export interface ReconnectingData {
 interface UseWhatsAppSocketOptions {
   serviceUrl?: string;
   autoConnect?: boolean;
+  enableSocket?: boolean;
 }
 
 export function useWhatsAppSocket(options: UseWhatsAppSocketOptions = {}) {
   const {
     serviceUrl = process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL || "http://localhost:3001",
     autoConnect = true,
+    // Socket disabled by default - only enable when whatsapp-service is running
+    enableSocket = process.env.NEXT_PUBLIC_ENABLE_SOCKET === "true",
   } = options;
 
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [isSocketConnected, setIsSocketConnected] = useState(false);
   const [status, setStatus] = useState<WhatsAppStatus>({
     status: "disconnected",
@@ -58,105 +59,119 @@ export function useWhatsAppSocket(options: UseWhatsAppSocketOptions = {}) {
   const [authFailure, setAuthFailure] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const socketRef = useRef<Socket | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const socketRef = useRef<any>(null);
+  const socketAttemptedRef = useRef(false);
 
-  // Initialize socket connection
+  // Initialize socket connection only if enabled and service URL is configured
   useEffect(() => {
-    if (!autoConnect) return;
+    if (!autoConnect || !enableSocket || socketAttemptedRef.current) return;
+    
+    socketAttemptedRef.current = true;
 
-    const newSocket = io(serviceUrl, {
-      transports: ["websocket", "polling"],
-      reconnection: true,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-    });
+    // Dynamically import socket.io-client to avoid errors when not needed
+    const initSocket = async () => {
+      try {
+        const { io } = await import("socket.io-client");
+        
+        const newSocket = io(serviceUrl, {
+          transports: ["websocket", "polling"],
+          reconnection: true,
+          reconnectionAttempts: 3, // Reduced attempts
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+          timeout: 5000, // 5 second timeout
+        });
 
-    socketRef.current = newSocket;
-    setSocket(newSocket);
+        socketRef.current = newSocket;
 
-    // Socket connection events
-    newSocket.on("connect", () => {
-      console.log("[Socket.io] Connected to WhatsApp service");
-      setIsSocketConnected(true);
-      setError(null);
-    });
+        // Socket connection events
+        newSocket.on("connect", () => {
+          console.log("[Socket.io] Connected to WhatsApp service");
+          setIsSocketConnected(true);
+          setError(null);
+        });
 
-    newSocket.on("disconnect", (reason) => {
-      console.log("[Socket.io] Disconnected:", reason);
-      setIsSocketConnected(false);
-    });
+        newSocket.on("disconnect", (reason: string) => {
+          console.log("[Socket.io] Disconnected:", reason);
+          setIsSocketConnected(false);
+        });
 
-    newSocket.on("connect_error", (err) => {
-      console.error("[Socket.io] Connection error:", err.message);
-      setError(`Erro de conexao: ${err.message}`);
-      setIsSocketConnected(false);
-    });
+        newSocket.on("connect_error", () => {
+          // Silently handle - will use HTTP fallback
+          setIsSocketConnected(false);
+        });
 
-    // WhatsApp events
-    newSocket.on("status", (data: WhatsAppStatus) => {
-      console.log("[Socket.io] Status update:", data);
-      setStatus(data);
-      
-      // Clear QR and reconnecting info when connected
-      if (data.connected) {
-        setQrData(null);
-        setReconnectingInfo(null);
-        setAuthFailure(null);
+        // WhatsApp events
+        newSocket.on("status", (data: WhatsAppStatus) => {
+          console.log("[Socket.io] Status update:", data);
+          setStatus(data);
+          
+          // Clear QR and reconnecting info when connected
+          if (data.connected) {
+            setQrData(null);
+            setReconnectingInfo(null);
+            setAuthFailure(null);
+          }
+        });
+
+        newSocket.on("qr", (data: QRData) => {
+          console.log("[Socket.io] QR Code received");
+          setQrData(data);
+        });
+
+        newSocket.on("message", (data: ReceivedMessage) => {
+          console.log("[Socket.io] New message:", data.from);
+          setLastMessage(data);
+        });
+
+        newSocket.on("reconnecting", (data: ReconnectingData) => {
+          console.log("[Socket.io] Reconnecting:", data);
+          setReconnectingInfo(data);
+        });
+
+        newSocket.on("auth_failure", (data: { message: string }) => {
+          console.error("[Socket.io] Auth failure:", data.message);
+          setAuthFailure(data.message);
+        });
+
+        newSocket.on("error", (data: { message: string }) => {
+          console.error("[Socket.io] Error:", data.message);
+          setError(data.message);
+        });
+      } catch {
+        // Socket.io not available or failed to connect
+        console.log("[Socket.io] Socket connection not available, using HTTP polling");
       }
-    });
+    };
 
-    newSocket.on("qr", (data: QRData) => {
-      console.log("[Socket.io] QR Code received");
-      setQrData(data);
-    });
-
-    newSocket.on("message", (data: ReceivedMessage) => {
-      console.log("[Socket.io] New message:", data.from);
-      setLastMessage(data);
-    });
-
-    newSocket.on("reconnecting", (data: ReconnectingData) => {
-      console.log("[Socket.io] Reconnecting:", data);
-      setReconnectingInfo(data);
-    });
-
-    newSocket.on("auth_failure", (data: { message: string }) => {
-      console.error("[Socket.io] Auth failure:", data.message);
-      setAuthFailure(data.message);
-    });
-
-    newSocket.on("error", (data: { message: string }) => {
-      console.error("[Socket.io] Error:", data.message);
-      setError(data.message);
-    });
+    initSocket();
 
     // Cleanup on unmount
     return () => {
-      console.log("[Socket.io] Cleaning up socket connection");
-      newSocket.disconnect();
-      socketRef.current = null;
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
     };
-  }, [serviceUrl, autoConnect]);
+  }, [serviceUrl, autoConnect, enableSocket]);
 
-  // Request WhatsApp connection
-  const connectWhatsApp = useCallback(() => {
+  // Request WhatsApp connection - always use HTTP for commands
+  const connectWhatsApp = useCallback(async () => {
+    // Emit via socket if connected
     if (socketRef.current?.connected) {
       socketRef.current.emit("connect_whatsapp");
-    } else {
-      // Fallback to HTTP if socket not connected
-      return fetch("/api/whatsapp/connect", { method: "POST" });
     }
+    // Always also call HTTP API for reliability
+    return fetch("/api/whatsapp/connect", { method: "POST" });
   }, []);
 
   // Request WhatsApp disconnection
-  const disconnectWhatsApp = useCallback(() => {
+  const disconnectWhatsApp = useCallback(async () => {
     if (socketRef.current?.connected) {
       socketRef.current.emit("disconnect_whatsapp");
-    } else {
-      // Fallback to HTTP if socket not connected
-      return fetch("/api/whatsapp/disconnect", { method: "POST" });
     }
+    return fetch("/api/whatsapp/disconnect", { method: "POST" });
   }, []);
 
   // Request current status
@@ -173,9 +188,21 @@ export function useWhatsAppSocket(options: UseWhatsAppSocketOptions = {}) {
     }
   }, []);
 
+  // Update status from HTTP polling (for external use)
+  const updateStatus = useCallback((newStatus: WhatsAppStatus) => {
+    setStatus(newStatus);
+  }, []);
+
+  const updateQrData = useCallback((newQrData: QRData | null) => {
+    setQrData(newQrData);
+  }, []);
+
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
   return {
     // Socket state
-    socket,
     isSocketConnected,
     
     // WhatsApp state
@@ -191,5 +218,10 @@ export function useWhatsAppSocket(options: UseWhatsAppSocketOptions = {}) {
     disconnectWhatsApp,
     requestStatus,
     requestQR,
+    
+    // State setters for HTTP polling fallback
+    updateStatus,
+    updateQrData,
+    clearError,
   };
 }
