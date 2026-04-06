@@ -10,7 +10,7 @@ import { MessageHistory } from "./message-history";
 import { ListCleaner } from "./list-cleaner";
 import { ConnectionLogs } from "./connection-logs";
 import { useWhatsAppSocket } from "@/lib/hooks/use-whatsapp-socket";
-import { Power, PowerOff, Phone, Send, History, Filter, FileText, Wifi, WifiOff } from "lucide-react";
+import { Power, PowerOff, Phone, Send, History, Filter, FileText, Wifi, WifiOff, Server } from "lucide-react";
 
 export function WhatsAppConnect() {
   const {
